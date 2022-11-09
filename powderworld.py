@@ -4,6 +4,9 @@ import torch.nn.functional as F
 from torch import nn
 import types
 import torch.jit as jit
+from collections import namedtuple
+ 
+Info = namedtuple('Info', ['rand_movement', 'rand_interact', 'rand_element', 'velocity_field', 'did_gravity'])
 
 # ================================================
 # ============= HELPERS ==================
@@ -31,10 +34,11 @@ def interp2(switch_a, switch_b, if_false, if_a, if_b):
 # ================================================
 
 class PowderWorld(torch.nn.Module):
-    def __init__(self, device):
+    def __init__(self, device, use_jit=True):
         with torch.no_grad():
             super().__init__()
             self.device = device
+            self.use_jit = use_jit
 
             # ================ REGISTER ELEMENTS. =================
             # Name:    ID, Density, GravityInter
@@ -87,6 +91,7 @@ class PowderWorld(torch.nn.Module):
             self.neighbor_kernel = torch.ones((1, 1, 3, 3), device=device)
 
             self.up = torch.Tensor([-1,0]).to(device)[None,:,None,None]
+            self.down = torch.Tensor([1,0]).to(device)[None,:,None,None]
             self.left = torch.Tensor([0,-1]).to(device)[None,:,None,None]
             self.right = torch.Tensor([0,1]).to(device)[None,:,None,None]
             
@@ -111,8 +116,10 @@ class PowderWorld(torch.nn.Module):
             BehaviorLava(self),
             BehaviorAcid(self),
             BehaviorCloner(self),
-            BeahviorVelocity(self),
+            BehaviorVelocity(self),
         ]
+        self.update_rules_jit = None
+    
 
     # =========== WORLD EDITING HELPERS ====================
     def add_element(self, world_slice, element_name, wind=None):
@@ -177,16 +184,19 @@ class PowderWorld(torch.nn.Module):
             velocity_field = torch.clone(world[:, self.NUM_ELEMENTS+4:self.NUM_ELEMENTS+6])
             did_gravity = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.device)
             
-            info = {
-                "rand_movement": rand_movement,
-                "rand_interact": rand_interact,
-                "rand_element": rand_element,
-                "velocity_field": velocity_field,
-                "did_gravity": did_gravity
-            }
+            info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
             
-            for update_rule in self.update_rules:
-                update_rule(world, info)
+            if self.update_rules_jit is None:            
+                if not self.use_jit:
+                    self.update_rules_jit = self.update_rules
+                else:
+                    print("Slow run to compile JIT.")
+                    self.update_rules_jit = []
+                    for update_rule in self.update_rules:
+                        self.update_rules_jit.append(torch.jit.trace(update_rule, (world, info)))
+            
+            for update_rule in self.update_rules_jit:
+                world, info = update_rule(world, info)
         return world
         
 
@@ -215,17 +225,18 @@ class PowderWorldRenderer(torch.nn.Module):
             ]).to(device)
             self.color_kernel /= 255.0
             self.color_kernel = self.color_kernel.T[:, :, None, None]
-            self.vector_color_kernel = torch.Tensor([
-                [68, 1, 84],
-                [64, 67, 135],
-                [41, 120, 142],
-                [34, 167, 132],
-                [121, 209, 81],
-                [253, 231, 36],
-                [68, 1, 84],
-            ]).to(device)
+#             self.vector_color_kernel = torch.Tensor([
+#                 [68, 1, 84],
+#                 [64, 67, 135],
+#                 [41, 120, 142],
+#                 [34, 167, 132],
+#                 [121, 209, 81],
+#                 [253, 231, 36],
+#                 [68, 1, 84],
+#             ]).to(device)
+            self.vector_color_kernel = torch.Tensor([200, 100, 100]).to(device)
             self.vector_color_kernel /= 255.0
-            self.vector_color_kernel = self.vector_color_kernel[:, :, None, None]
+            self.vector_color_kernel = self.vector_color_kernel[:, None, None]
             self.NUM_ELEMENTS = self.color_kernel.shape[1]
     
     # ================ RENDERING ====================
@@ -239,9 +250,11 @@ class PowderWorldRenderer(torch.nn.Module):
             is_y_lessthan_zero = (velocity_field[0] < 0)
             velocity_field_angles_raw = interp(switch=is_y_lessthan_zero, if_false=velocity_field_angles_raw, if_true=(1 - velocity_field_angles_raw))
             velocity_field_angles = velocity_field_angles_raw
-            velocity_field_colors = torch.zeros_like(img)
-            for c in range(7):
-                velocity_field_colors += self.vector_color_kernel[c] * torch.clamp(1 - 7*torch.abs((velocity_field_angles - c/6)), 0, 1)
+            
+            velocity_field_colors = self.vector_color_kernel
+#             velocity_field_colors = torch.zeros_like(img)
+#             for c in range(7):
+#                 velocity_field_colors += self.vector_color_kernel[c] * torch.clamp(1 - 7*torch.abs((velocity_field_angles - c/6)), 0, 1)
 
             velocity_field_display = torch.clamp(velocity_field_magnitudes/2, 0, 0.5)
             img = (1-velocity_field_display)*img + velocity_field_display*velocity_field_colors
@@ -271,7 +284,7 @@ class BehaviorGravity(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        did_gravity = info['did_gravity']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         for currDensity in [0,1,2,3,4]:
             density = world[:, self.pw.NUM_ELEMENTS:self.pw.NUM_ELEMENTS+1]
             density_delta = get_above(density) - density # Delta between ABOVE and current
@@ -293,7 +306,8 @@ class BehaviorGravity(torch.nn.Module):
             world_below = get_below(world)
             world[:] = interp2(switch_a=does_become_below, switch_b=does_become_above,
                               if_false=world, if_a=world_below, if_b=world_above)
-        info['did_gravity'][:] = did_gravity
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
     
 class BehaviorSand(torch.nn.Module):
     """
@@ -306,8 +320,7 @@ class BehaviorSand(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        rand_movement = info['rand_movement']
-        did_gravity = info['did_gravity']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         for elem_name in ['sand', 'dust']:
             elem = self.pw.element_names.index(elem_name)
             fall_dir = (rand_movement > 0.5)
@@ -337,6 +350,8 @@ class BehaviorSand(torch.nn.Module):
 
                 world[:] = interp2(switch_a=does_become_below_left, switch_b=does_become_above_right,
                               if_false=world, if_a=world_below_left, if_b=world_above_right)
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
     
 class BehaviorStone(torch.nn.Module):
     """Run stone-stability procedure. If a stone is next to two stones, turn gravity off. Otherwise, turn it on."""
@@ -351,6 +366,7 @@ class BehaviorStone(torch.nn.Module):
         has_stone_supports = F.conv2d(stone, self.stone_kernel, padding=1)
         world[:, self.pw.NUM_ELEMENTS+1:self.pw.NUM_ELEMENTS+2] = \
             (1-stone)*world[:, self.pw.NUM_ELEMENTS+1:self.pw.NUM_ELEMENTS+2] + stone*(has_stone_supports < 2)
+        return world, info
     
 class BehaviorFluidFlow(torch.nn.Module):
     """
@@ -360,8 +376,7 @@ class BehaviorFluidFlow(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        rand_movement = info['rand_movement']
-        did_gravity = info['did_gravity']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         fluid_momentum = world[:, self.pw.NUM_ELEMENTS+2:self.pw.NUM_ELEMENTS+3, :, :]
         new_fluid_momentum = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.pw.device)
         fall_rand = rand_movement
@@ -396,6 +411,8 @@ class BehaviorFluidFlow(torch.nn.Module):
                               if_false=world, if_a=world_left, if_b=world_right)
 
         world[:, self.pw.NUM_ELEMENTS+2:self.pw.NUM_ELEMENTS+3, :, :] = new_fluid_momentum
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
         
 class BehaviorIce(torch.nn.Module):
     """
@@ -405,13 +422,15 @@ class BehaviorIce(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        rand_interact = info['rand_interact']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         ice_chance = rand_interact
         ice_melting_neighbors = self.pw.get_elem(world, "empty") + self.pw.get_elem(world, "fire") \
             + self.pw.get_elem(world, "lava") + self.pw.get_elem(world, "water")
         ice_can_melt = (F.conv2d(ice_melting_neighbors, self.pw.neighbor_kernel, padding=1) > 1)
         does_turn_water = self.pw.get_bool(world, "ice") & ice_can_melt & (ice_chance < 0.02)
         world[:] = interp(switch=does_turn_water, if_false=world, if_true=self.pw.elem_vecs['water'])
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
     
 class BehaviorWater(torch.nn.Module):
     """
@@ -421,11 +440,13 @@ class BehaviorWater(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        rand_element = info['rand_element']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         ice_chance = rand_element
         water_can_freeze = (F.conv2d(self.pw.get_elem(world, "ice"), self.pw.neighbor_kernel, padding=1) >= 3)
         does_turn_ice = self.pw.get_bool(world, "water") & water_can_freeze & (ice_chance < 0.05)
         world[:] = interp(switch=does_turn_ice, if_false=world, if_true=self.pw.elem_vecs['ice'])
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
         
 class BehaviorFire(torch.nn.Module):
     """
@@ -435,9 +456,7 @@ class BehaviorFire(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        velocity_field = info['velocity_field']
-        rand_interact = info['rand_interact']
-        rand_element = info['rand_element']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         burn_chance = rand_interact
         fire_and_lava = self.pw.get_elem(world, "fire") + self.pw.get_elem(world, "lava")
         has_fire_neighbor = F.conv2d(fire_and_lava, self.pw.neighbor_kernel, padding=1) > 0
@@ -449,14 +468,17 @@ class BehaviorFire(torch.nn.Module):
         does_burn = (does_burn_wood | does_burn_plant | does_burn_gas | does_burn_dust) & has_fire_neighbor
         
         # Velocity for fire
-        velocity_field += 10*get_left(does_burn & has_fire_neighbor)*self.pw.left
-        velocity_field += 10*(does_burn & has_fire_neighbor)*self.pw.up
-        velocity_field += 10*get_right(does_burn & has_fire_neighbor)*self.pw.right
-        velocity_field += 20*get_left(does_burn_dust & has_fire_neighbor)*self.pw.left
-        velocity_field += 20*(does_burn_dust & has_fire_neighbor)*self.pw.up
-        velocity_field += 20*get_right(does_burn_dust & has_fire_neighbor)*self.pw.right
-        info['velocity_field'][:] = velocity_field
-
+        velocity_field -= 2*get_left(does_burn & has_fire_neighbor)*self.pw.left
+        velocity_field -= 2*get_above(does_burn & has_fire_neighbor)*self.pw.up
+        velocity_field -= 2*get_below(does_burn & has_fire_neighbor)*self.pw.down
+        velocity_field -= 2*get_right(does_burn & has_fire_neighbor)*self.pw.right
+        
+        
+        velocity_field -= 20*get_left(does_burn_dust & has_fire_neighbor)*self.pw.left
+        velocity_field -= 20*get_above(does_burn_dust & has_fire_neighbor)*self.pw.up
+        velocity_field -= 20*get_below(does_burn_dust & has_fire_neighbor)*self.pw.down
+        velocity_field -= 20*get_right(does_burn_dust & has_fire_neighbor)*self.pw.right
+        
         world[:] = interp(switch=does_burn, if_false=world, if_true=self.pw.elem_vecs['fire'])
         world[:] = interp(switch=does_burn_ice, if_false=world, if_true=self.pw.elem_vecs['water'])
 
@@ -472,6 +494,9 @@ class BehaviorFire(torch.nn.Module):
         has_burnable_neighbor = F.conv2d(burnables, self.pw.neighbor_kernel, padding=1)
         does_fire_turn_empty = self.pw.get_bool(world, "fire") & (fire_chance < 0.4) & (has_burnable_neighbor == 0)
         world[:] = interp(switch=does_fire_turn_empty, if_false=world, if_true=self.pw.elem_vecs['empty'])
+        
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
 
         
 class BehaviorPlant(torch.nn.Module):
@@ -482,7 +507,7 @@ class BehaviorPlant(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        rand_interact = info['rand_interact']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         plant_chance = rand_interact
         plant_counts = F.conv2d(self.pw.get_elem(world, "plant"), self.pw.neighbor_kernel, padding=1)
         does_plantgrow = self.pw.get_bool(world, "water") & (plant_chance < 0.05)
@@ -490,6 +515,8 @@ class BehaviorPlant(torch.nn.Module):
         does_plantgrow_empty = does_plantgrow & (plant_counts > 3)
         world[:] = interp2(switch_a=does_plantgrow_plant, switch_b=does_plantgrow_empty,
                               if_false=world, if_a=self.pw.elem_vecs['plant'], if_b=self.pw.elem_vecs['empty'])
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
         
 class BehaviorLava(torch.nn.Module):
     """
@@ -502,6 +529,7 @@ class BehaviorLava(torch.nn.Module):
         water_counts = F.conv2d(self.pw.get_elem(world, "water"), self.pw.neighbor_kernel, padding=1)
         does_turn_stone = (water_counts > 0) & self.pw.get_bool(world, "lava")
         world[:] = interp(switch=does_turn_stone, if_false=world, if_true=self.pw.elem_vecs['stone'])
+        return world, info
         
 class BehaviorAcid(torch.nn.Module):
     """
@@ -511,7 +539,7 @@ class BehaviorAcid(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        rand_interact = info['rand_interact']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         acid_rand = (rand_interact < 0.2)
         is_block = ~(self.pw.get_bool(world, "empty") | self.pw.get_bool(world, "wall") | self.pw.get_bool(world, "acid") | self.pw.get_bool(world, "cloner"))
         is_acid = self.pw.get_bool(world, "acid")
@@ -520,6 +548,8 @@ class BehaviorAcid(torch.nn.Module):
             | (is_block & get_below(acid_rand) & get_below(is_acid))
         does_dissapear = does_acid_dissapear | does_block_dissapear
         world[:] = interp(switch=does_dissapear, if_false=world, if_true=self.pw.elem_vecs['empty'])
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
         
 class BehaviorCloner(torch.nn.Module):
     """
@@ -545,8 +575,14 @@ class BehaviorCloner(torch.nn.Module):
             is_dir_cloner_not_empty = get_dir(self.pw.get_bool(world, "cloner") & ((cloner_assigns != 0) & (cloner_assigns != 13))) \
                 & self.pw.get_bool(world, "empty")
             world[:] = interp(switch=is_dir_cloner_not_empty, if_false=world, if_true=cloner_assigns_vec_dir)
-            
-class BeahviorVelocity(torch.nn.Module):
+        return world, info
+
+
+@torch.jit.script # JIT decorator
+def interp_vel(switch_a, switch_b, world, if_a, if_b):
+    return world - switch_a*world - switch_b*world + switch_a*if_a + switch_b*if_b
+
+class BehaviorVelocity(torch.nn.Module):
     """
     Velocity field movement
     """
@@ -554,13 +590,14 @@ class BeahviorVelocity(torch.nn.Module):
         super().__init__()
         self.pw = pw
     def forward(self, world, info):
-        velocity_field = info['velocity_field']
+        rand_movement, rand_interact, rand_element, velocity_field, did_gravity = info
         for n in range(2):
             velocity_field_magnitudes = torch.norm(velocity_field, dim=1)[:, None]
             velocity_field_angles_raw = (1/(2*torch.pi)) * torch.acos(velocity_field[:,1:2] / (velocity_field_magnitudes+0.001))
             is_y_lessthan_zero = (velocity_field[:,0:1] < 0)
             velocity_field_angle = interp(switch=is_y_lessthan_zero, if_false=velocity_field_angles_raw, if_true=(1 - velocity_field_angles_raw))
             velocity_field_delta = velocity_field.clone()
+            
             for angle in [0,1,2,3,4,5,6,7]:
                 is_angle_match = (torch.remainder(torch.floor(velocity_field_angle * 8 + 0.5), 8) == angle)
                 is_velocity_enough = (velocity_field_magnitudes > 0.1)
@@ -570,8 +607,7 @@ class BeahviorVelocity(torch.nn.Module):
                 does_become_opposite = self.pw.direction_func((angle+4) % 8, does_become_empty)
                 opposite_world = self.pw.direction_func((angle+4) % 8, world)
 
-                world[:] = world - (does_become_empty)*world - (does_become_opposite)*world \
-                    + (does_become_empty)*self.pw.elem_vecs['empty'] + (does_become_opposite)*opposite_world
+                world[:] = interp_vel(does_become_empty, does_become_opposite, world, self.pw.elem_vecs['empty'], opposite_world)
 
                 angle_velocity_field = self.pw.direction_func(angle, velocity_field)
                 opposite_velocity_field = self.pw.direction_func((angle+4) % 8, velocity_field)
@@ -587,3 +623,5 @@ class BeahviorVelocity(torch.nn.Module):
             velocity_field[:, 0:1] = F.conv2d(velocity_field[:, 0:1], self.pw.neighbor_kernel/18, padding=1) + velocity_field[:, 0:1]*0.5
             velocity_field[:, 1:2] = F.conv2d(velocity_field[:, 1:2], self.pw.neighbor_kernel/18, padding=1) + velocity_field[:, 1:2]*0.5
         world[:, self.pw.NUM_ELEMENTS+4:self.pw.NUM_ELEMENTS+6] = velocity_field
+        info = Info(rand_movement, rand_interact, rand_element, velocity_field, did_gravity)
+        return world, info
