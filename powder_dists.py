@@ -52,6 +52,15 @@ def weighted_line(r0, c0, r1, c1, w, rmin=0, rmax=np.inf):
 
     return (yy[mask].astype(int), xx[mask].astype(int), vals[mask])
 
+def make_empty_world(pw, world):
+    # empty space
+    pw.add_element(world[:, :, :, :], "empty")
+    # border
+    pw.add_element(world[:, :, 0:1, :], "wall")
+    pw.add_element(world[:, :, 63:64, :], "wall")
+    pw.add_element(world[:, :, :, 0:1], "wall")
+    pw.add_element(world[:, :, :, 63:64], "wall")
+
 def make_world(pw, world, elems=['empty','sand', 'water', 'wall'], num_tasks=1000000, num_lines=5, num_circles=0, num_squares=0):
     seed = np.random.randint(num_tasks)
     rand = np.random.RandomState(seed)
