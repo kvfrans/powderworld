@@ -60,12 +60,27 @@ class CustomCNN(BaseFeaturesExtractor):
         return self.linear(self.cnn(observations))
 
 def train_agent(args):
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    
+    callbacks = []
     if args.track:
         run = wandb.init(
             name=args.exp_name,
             sync_tensorboard=True,
             monitor_gym=True,
             save_code=True)
+        callback = WandbCallback(verbose=2)
+                                 # model_save_path=f"models/{run.id}", 
+                                 # model_save_freq=args.n_steps//5,
+                                 # gradient_save_freq=args.n_steps//5)
+                                 # model_save_freq=None,
+                                 # gradient_save_freq=None,)
+        callbacks.append(callback)
+    # folder_tensorboard = f"runs/{run.id}/tb" if args.track else None
+    # folder_video = f"runs/{run.id}/videos" if args.track else None
+    folder_tensorboard = f"runs/{run.id}" if args.track else None
+    folder_video = f"videos/{run.id}" if args.track else None
     
     all_elems = ['empty', 'sand', 'water', 'wall', 'plant', 'stone', 'lava']
     kwargs_pcg = dict(hw=(64,64), elems=all_elems[:args.n_elems], num_tasks=100000, 
@@ -74,26 +89,29 @@ def train_agent(args):
     if args.env=='sand':
         env = envs.PWSandEnv(False, kwargs_pcg, device=args.device)
     elif args.env=='draw':
+        # temporary different settings for draw enviornment
+        kwargs_pcg = dict(hw=(64,64), elems=['sand'], num_tasks=100000, 
+                          num_lines=args.n_lines, num_circles=args.n_circles, num_squares=args.n_squares, has_empty_path=False)
         env = envs.PWDrawEnv(False, kwargs_pcg, device=args.device)
     elif args.env=='destroy':
         env = envs.PWDestroyEnv(False, kwargs_pcg, device=args.device)
         
     env = VecMonitor(env)
     if args.track:
-        env = VecVideoRecorder(env, f"videos/{run.id}", record_video_trigger=lambda x: x % 2000 == 0, video_length=500)
+        env = VecVideoRecorder(env, folder_video,
+                               record_video_trigger=lambda x: x%2000==0, video_length=500)
     
     policy_kwargs = dict(
         features_extractor_class=CustomCNN,
         features_extractor_kwargs=dict(features_dim=20),
     )
     
-    model = PPO('CnnPolicy', env, policy_kwargs=policy_kwargs, n_steps=64, batch_size=64, verbose=1, tensorboard_log=f"runs/{run.id}")
-    callback = WandbCallback(gradient_save_freq=10000, model_save_path=f"models/{run.id}", verbose=2)
-    model.learn(total_timesteps=args.n_steps, callback=callback)
+    model = PPO('CnnPolicy', env, policy_kwargs=policy_kwargs, n_steps=128, batch_size=2048, verbose=2, tensorboard_log=folder_tensorboard, seed=args.seed, device=args.device)
+    model.learn(total_timesteps=args.n_steps, callback=callbacks, progress_bar=True)
     
     if args.track:
         run.finish()
-    
+        
 parser = argparse.ArgumentParser()
 parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
 parser.add_argument("--exp-name", type=str, default=None)
@@ -103,8 +121,8 @@ parser.add_argument("--device", type=str, default='cuda:0')
 parser.add_argument("--env", type=str, default='sand')
 parser.add_argument("--n_elems", type=int, default=4)
 parser.add_argument("--n_lines", type=int, default=0)
-parser.add_argument("--n_circles", type=int, default=0)
-parser.add_argument("--n_squares", type=int, default=0)
+parser.add_argument("--n_circles", type=int, default=5)
+parser.add_argument("--n_squares", type=int, default=5)
 
 parser.add_argument("--n_steps", type=int, default=500_000)
 
