@@ -4,12 +4,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-from powderworld import PowderWorld, PowderWorldRenderer
 from PIL import Image
-import powder_dists
-
-
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvIndices, VecEnvObs, VecEnvStepReturn
+
+import powderworld.dists
+from powderworld.sim import PWSim, PWRenderer
 
 
 def lim(x):
@@ -31,7 +30,7 @@ Destroy Environment
 kwargs_pcg_default = dict(hw=(64, 64), elems=['stone'], num_tasks=1000000, num_lines=5, num_circles=0, num_squares=0, has_empty_path=False)
 
 class PWGeneralEnv(VecEnv):
-    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=64, batch_size=32, device=None):
+    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=64, batch_size=32, device=None, use_jit=True):
         if kwargs_pcg is None:
             kwargs_pcg = kwargs_pcg_default
 
@@ -41,8 +40,8 @@ class PWGeneralEnv(VecEnv):
         self.batch_size = batch_size
         self.device = device
 
-        self.pw = PowderWorld(self.device)
-        self.pwr = PowderWorldRenderer(self.device)
+        self.pw = PWSim(self.device, use_jit)
+        self.pwr = PWRenderer(self.device)
 
         self.hw = self.kwargs_pcg['hw']
         self.action_resolution = 4
@@ -110,80 +109,11 @@ class PWGeneralEnv(VecEnv):
         return [env_util.is_wrapped(self, wrapper_class) for i in indices]
 
 class PWDrawEnv(PWGeneralEnv):
-    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=20, n_world_settle=0, batch_size=32, device=None, dense_reward=True):
-        super().__init__(test=test, kwargs_pcg=kwargs_pcg, total_timesteps=total_timesteps, batch_size=batch_size, device=device)
-        self.observation_space = spaces.Box(low=-5., high=5., shape=(2*self.pw.NUM_CHANNEL, *self.hw), dtype=np.float32)
-
-        self.n_world_settle = n_world_settle
-        
-        self.dense_reward = dense_reward
-        
-        self.world_start, self.world_end = None, None
-        self.world_agent_start, self.world_agent_end = None, None
+    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=64, batch_size=32, device=None, dense_reward=True, use_jit=True):
+        super().__init__(test=test, kwargs_pcg=kwargs_pcg, total_timesteps=total_timesteps, batch_size=batch_size, device=device, use_jit=use_jit)
+        self.action_space = spaces.MultiDiscrete(np.array([16, 16, 2, 3, 3]))
+        self.test_idx = 0
         self.reset()
-
-    def reset(self):
-        self.timestep = 0
-        self.world_start = torch.zeros((self.batch_size, self.pw.NUM_CHANNEL, 64, 64), dtype=torch.float32, device=self.device)
-        self.world_agent_start = torch.zeros((self.batch_size, self.pw.NUM_CHANNEL, 64, 64), dtype=torch.float32, device=self.device)
-        powder_dists.make_empty_world(self.pw, self.world_start)
-        powder_dists.make_empty_world(self.pw, self.world_agent_start)
-
-        # Randomly placed elements
-        for b in range(self.batch_size):
-            if self.test:
-                powder_dists.make_test(self.pw, self.world_start[b:b+1], b % 8)
-            else:
-                args = ['elems', 'num_tasks', 'num_lines', 'num_circles', 'num_squares']
-                powder_dists.make_world(self.pw, self.world_start[b:b+1], **{k: self.kwargs_pcg[k] for k in args})
-        
-        self.world_end = self.rollout_world(self.world_start)
-            
-        ob = torch.cat([self.world_agent_start, self.world_end], dim=1).cpu().numpy()
-        return ob
-    
-    def rollout_world(self, world):
-        world_end = world.clone()
-        for _ in range(self.n_world_settle):
-            world_end = self.pw(world_end)
-        return world_end
-                    
-    def step_wait(self):
-        # temporary force draw sand
-        self.apply_action(self.world_agent_start, self.actions, force_elem='sand')
-        
-        rew, done = self.get_rew(), (self.timestep == self.total_timesteps-1)
-        
-        ob = torch.cat([self.world_agent_start, self.world_end], dim=1).cpu().numpy()
-        dones = np.array([done] * self.batch_size)
-        if done:
-            ob = self.reset()
-        info = [{}] * self.batch_size
-        self.timestep += 1
-        return ob, rew, dones, info
-    
-    def get_rew(self):
-        if not self.dense_reward and self.timestep < self.total_timesteps-1: # sparse reward and not the end
-            return 0
-        
-        # rollout env
-        self.world_agent_end = self.rollout_world(self.world_agent_start)
-        
-        world_blur = F.max_pool2d(self.world_agent_end, kernel_size=3, stride=1)
-        world_truth_blur = F.max_pool2d(self.world_end, kernel_size=3, stride=1)
-        rew = -F.mse_loss(world_blur[:,:14], world_truth_blur[:,:14], reduction='none')
-        rew = torch.sum(rew, dim=(1,2,3)).cpu().numpy() / 500
-        return rew
-
-    def render(self, env_id=0, mode='rgb_array'):
-        assert mode=='rgb_array'
-        a = self.pwr.render(self.world_agent_start[[env_id]])
-        b = self.pwr.render(self.world_end[[env_id]])
-        return np.concatenate([a, b], axis=1)
-
-class PWSandEnv(PWGeneralEnv):
-    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=64, batch_size=32, device=None):
-        super().__init__(test=test, kwargs_pcg=kwargs_pcg, total_timesteps=total_timesteps, batch_size=batch_size, device=device)
 
     def reset(self):
         self.world = torch.zeros((self.batch_size, self.pw.NUM_CHANNEL, 64, 64), dtype=torch.float32, device=self.device)
@@ -191,10 +121,66 @@ class PWSandEnv(PWGeneralEnv):
         # Randomly placed elements
         for b in range(self.batch_size):
             if self.test:
-                powder_dists.make_rl_test(self.pw, self.world[b:b+1], b % 8)
+                self.test_idx += 1
+                powderworld.dists.make_test160(self.pw, self.world[b:b+1], self.test_idx % 160)    
             else:
-                args = ['elems', 'num_tasks', 'num_lines', 'num_circles', 'num_squares', 'has_empty_path']
-                powder_dists.make_rl_world(self.pw, self.world[b:b+1], **{k: self.kwargs_pcg[k] for k in args})
+                args = ['elems', 'num_tasks', 'num_lines', 'num_circles', 'num_squares']
+                powderworld.dists.make_water_world(self.pw, self.world[b:b+1], **{k: self.kwargs_pcg[k] for k in args})
+                watery = 10
+                waterx = 20
+                # Water
+                self.pw.add_element(self.world[b:b+1, :, watery-5:watery+5, waterx-15:waterx+15], "water")
+                self.pw.add_element(self.world[b:b+1, :, watery-4:watery+4, waterx-14:waterx+14], "cloner")
+                # Border
+                self.pw.add_element(self.world[b:b+1, :, 40:64, -20:-18], "wall")
+                self.pw.add_element(self.world[b:b+1, :, :, -18:], "empty")
+        
+        self.timestep = 0
+        return self.world.cpu().numpy()
+                    
+    def step_wait(self):
+        self.apply_action(self.world, self.actions)
+        
+        self.pw.add_element(self.world[:, :, 40:64, -20:-18], "wall")
+        
+        for t in range(3):
+            self.world = self.pw(self.world)
+        self.timestep += 1
+        ob = self.world.cpu().numpy()
+        rew = self.get_rew()
+        done = self.timestep >= self.total_timesteps
+        dones = np.array([done] * self.batch_size)
+        if done:
+            ob = self.reset()
+        info = [{}] * self.batch_size
+        return ob, rew, dones, info
+    
+    def get_rew(self):
+        rew = torch.sum(self.world[:, 3:4, 40:64, -20:], dim=(1,2,3)).cpu().numpy() / 150
+        return rew
+
+    def render(self, env_id=0, mode='rgb_array'):
+        assert mode=='rgb_array'
+        im = self.pwr.render(self.world[[env_id]])
+        im = Image.fromarray(im)
+        im = im.resize((256, 256), Image.NEAREST)
+        im = np.array(im)
+        return im
+
+class PWSandEnv(PWGeneralEnv):
+    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=64, batch_size=32, device=None, use_jit=True):
+        super().__init__(test=test, kwargs_pcg=kwargs_pcg, total_timesteps=total_timesteps, batch_size=batch_size, device=device, use_jit=use_jit)
+
+    def reset(self):
+        self.world = torch.zeros((self.batch_size, self.pw.NUM_CHANNEL, 64, 64), dtype=torch.float32, device=self.device)
+
+        # Randomly placed elements
+        for b in range(self.batch_size):
+            if self.test:
+                powderworld.dists.make_rl_test(self.pw, self.world[b:b+1], b % 8)
+            else:
+                args = ['elems', 'num_tasks', 'num_lines', 'num_circles', 'num_squares']
+                powderworld.dists.make_rl_world(self.pw, self.world[b:b+1], **{k: self.kwargs_pcg[k] for k in args})
         
         self.timestep = 0
         return self.world.cpu().numpy()
@@ -220,42 +206,60 @@ class PWSandEnv(PWGeneralEnv):
     
     def render(self, env_id=0, mode='rgb_array'):
         assert mode=='rgb_array'
-        return self.pwr.render(self.world[[env_id]])
+        im = self.pwr.render(self.world[[env_id]])
+        im = Image.fromarray(im)
+        im = im.resize((256, 256), Image.NEAREST)
+        im = np.array(im)
+        return im
 
-class PWDestroyEnv(PWDrawEnv):
-    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=5, n_world_settle=0, batch_size=32, device=None):
-        super().__init__(test=test, kwargs_pcg=kwargs_pcg, total_timesteps=total_timesteps, batch_size=batch_size, device=device)
+class PWDestroyEnv(PWGeneralEnv):
+    def __init__(self, test=False, kwargs_pcg=None, total_timesteps=5, n_world_settle=64, batch_size=32, device=None, use_jit=True):
+        super().__init__(test=test, kwargs_pcg=kwargs_pcg, total_timesteps=total_timesteps, batch_size=batch_size, device=device, use_jit=use_jit)
+        self.n_world_settle = n_world_settle
+        self.test_idx = 0
     
     def reset(self):
-        self.timestep = 0
-        self.world_start = torch.zeros((self.batch_size, self.pw.NUM_CHANNEL, 64, 64), dtype=torch.float32, device=self.device)
-        self.world_agent_start = torch.zeros((self.batch_size, self.pw.NUM_CHANNEL, 64, 64), dtype=torch.float32, device=self.device)
-        powder_dists.make_empty_world(self.pw, self.world_start)
-        powder_dists.make_empty_world(self.pw, self.world_agent_start)
-        
+        self.world = torch.zeros((self.batch_size, self.pw.NUM_CHANNEL, 64, 64), dtype=torch.float32, device=self.device)
+
         # Randomly placed elements
         for b in range(self.batch_size):
             if self.test:
-                powder_dists.make_test(self.pw, self.world_agent_start[b:b+1], b % 8)
+                self.test_idx += 1
+                powderworld.dists.make_test160(self.pw, self.world[b:b+1], self.test_idx % 160)
             else:
                 args = ['elems', 'num_tasks', 'num_lines', 'num_circles', 'num_squares']
-                powder_dists.make_world(self.pw, self.world_agent_start[b:b+1], **{k: self.kwargs_pcg[k] for k in args})
+                powderworld.dists.make_world(self.pw, self.world[b:b+1], **{k: self.kwargs_pcg[k] for k in args})
         
-        self.truth_elems = np.random.randint(1,6, size=(self.batch_size,))
-        for b in range(self.batch_size):
-            radius = 4
-            elem = int(self.truth_elems[b])
-            x1 = np.random.randint(1,8) * 8 + 4
-            y1 = np.random.randint(1,8) * 8 + 4
-            self.pw.add_element(self.world_agent_start[b:b+1, :, lim(x1-radius):lim(x1+radius), lim(y1-radius):lim(y1+radius)], elem)
-            
-        self.world_end = self.world_start.clone()
-        for _ in range(self.n_world_settle):
-            self.world_end = self.pw(self.world_end)
-            
-        ob = torch.cat([self.world_agent_start, self.world_end], dim=1).cpu().numpy()
-        return ob
-
-
-
-
+        self.timestep = 0
+        return self.world.cpu().numpy()
+                    
+    def step_wait(self):
+        self.apply_action(self.world, self.actions)
+        
+        self.world = self.pw(self.world)
+        self.timestep += 1
+        ob = self.world.cpu().numpy()
+        rew = self.get_rew()
+        done = self.timestep >= self.total_timesteps
+        dones = np.array([done] * self.batch_size)
+        if done:
+            ob = self.reset()
+        info = [{}] * self.batch_size
+        return ob, rew, dones, info
+    
+    def get_rew(self):
+        # measure the amount of sand in the goal area
+        rew = np.zeros(self.world.shape[0])
+        if self.timestep >= self.total_timesteps:
+            for t in range(self.n_world_settle):
+                self.world = self.pw(self.world)
+            rew = torch.sum(self.world[:, 0:1, :, :], dim=(1,2,3)).cpu().numpy() / 1000
+        return rew
+    
+    def render(self, env_id=0, mode='rgb_array'):
+        assert mode=='rgb_array'
+        im = self.pwr.render(self.world[[env_id]])
+        im = Image.fromarray(im)
+        im = im.resize((256, 256), Image.NEAREST)
+        im = np.array(im)
+        return im

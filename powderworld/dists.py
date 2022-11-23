@@ -1,7 +1,9 @@
 import torch
 import numpy as np
-import powderworld
 import skimage.draw
+import os
+
+saved_worlds = torch.from_numpy(np.load(os.path.join(os.path.dirname(__file__), '160worlds.npy')))
 
 def lim(x):
     return np.clip(1, 63, int(x))
@@ -52,10 +54,11 @@ def weighted_line(r0, c0, r1, c1, w, rmin=0, rmax=np.inf):
 
     return (yy[mask].astype(int), xx[mask].astype(int), vals[mask])
 
+def init_world(pw, xsize=64, ysize=64, batchsize=1):
+    return torch.zeros((batchsize, pw.NUM_CHANNEL, xsize, ysize), dtype=torch.float32, device=pw.device)
+
 def make_empty_world(pw, world):
-    # empty space
     pw.add_element(world[:, :, :, :], "empty")
-    # border
     pw.add_element(world[:, :, 0:1, :], "wall")
     pw.add_element(world[:, :, 63:64, :], "wall")
     pw.add_element(world[:, :, :, 0:1], "wall")
@@ -94,6 +97,9 @@ def make_world(pw, world, elems=['empty','sand', 'water', 'wall'], num_tasks=100
     pw.add_element(world[:, :, 63:64, :], "wall")
     pw.add_element(world[:, :, :, 0:1], "wall")
     pw.add_element(world[:, :, :, 63:64], "wall")
+    
+def make_test160(pw, world, test_num):
+    world[:] = saved_worlds[test_num]
     
 def make_test(pw, world, test_num):
     pw.add_element(world[:, :, :, :], "empty")
@@ -197,9 +203,6 @@ def make_rl_world(pw, world, elems=['empty','sand', 'water', 'wall'], num_tasks=
         x1 = rand.randint(64)
         y1 = rand.randint(64)
         pw.add_element(world[:, :, lim(x1-radius):lim(x1+radius), lim(y1-radius):lim(y1+radius)], elem)
-    # if has_empty_path or True:
-    #     rr, cc, _ = weighted_line(sandy, sandx, 32, 60, 20, 0, 64)
-    #     pw.add_element_rc(world, rr, cc, 'empty')
     
     # Wall
     pw.add_element(world[:, :, 0:1, :], "wall")
@@ -279,3 +282,4 @@ def make_rl_test(pw, world, test_num):
     # Border
     pw.add_element(world[:, :, :, -10:-1], "wall")
     pw.add_element(world[:, :, 32-10:32+10, -10:-1], "empty")
+    

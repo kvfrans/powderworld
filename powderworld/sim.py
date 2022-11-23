@@ -33,7 +33,7 @@ def interp2(switch_a, switch_b, if_false, if_a, if_b):
 # ============= GENERAL CLASS =================
 # ================================================
 
-class PowderWorld(torch.nn.Module):
+class PWSim(torch.nn.Module):
     def __init__(self, device, use_jit=True):
         with torch.no_grad():
             super().__init__()
@@ -203,7 +203,7 @@ class PowderWorld(torch.nn.Module):
 # ================================================
 # ============== RENDERER ========================
 # ================================================
-class PowderWorldRenderer(torch.nn.Module):
+class PWRenderer(torch.nn.Module):
     def __init__(self, device):
         with torch.no_grad():
             super().__init__()
