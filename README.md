@@ -7,3 +7,12 @@ As the AI research community moves towards general agents, which can solve many 
 To this end, we introduce Powderworld, a lightweight simulation environment for understanding AI generalization. Powderworld presents a 2D ruleset where elements (e.g. sand, water, fire) modularly react within local neighborhoods. Local interactions combine to form wide-scale emergent phenomena, allowing diverse tasks to be defined over the same core rules. Powderworld runs directly on the GPU, allowing up to 10,000 simulation steps per second, an order of magnitude faster than other RL environments like Atari or MineRL.
 
 View the [Project Website](https://kvfrans.com/static/powder/) for more details.
+
+Examples:
+```
+# Train an agent on the Sand-Pushing env:
+python examples/powder_agent.py --savedir test --env_name sand
+
+# Train an 8-step world model.
+python examples/powder_worldmodel.py --savedir test
+```
