@@ -8,6 +8,7 @@ setup(
     author='Kevin Frans',
     author_email='kevinfrans2@gmail.com',
     license='MIT',
+    zip_safe=False,
     packages=['powderworld'],
     install_requires=['torch',
                       'numpy',
