@@ -10,6 +10,7 @@ setup(
     license='MIT',
     zip_safe=False,
     packages=['powderworld'],
+    include_package_data=True,
     install_requires=['torch',
                       'numpy',
                       'stable_baselines3',
