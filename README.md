@@ -8,6 +8,12 @@ To this end, we introduce Powderworld, a lightweight simulation environment for 
 
 View the [Project Website](https://kvfrans.com/static/powder/) for more details.
 
+
+
+https://user-images.githubusercontent.com/1484166/203631565-bc5a4083-fa67-47a8-9e42-0f12e1eb2156.mp4
+
+
+
 Examples:
 ```
 # Train an agent on the Sand-Pushing env:
