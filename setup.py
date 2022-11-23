@@ -13,6 +13,7 @@ setup(
                       'numpy',
                       'stable_baselines3',
                       'gym',
-                      'matplotlib'
+                      'matplotlib',
+                      'scikit-image',
                       ],
 )
