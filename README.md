@@ -16,6 +16,7 @@ https://user-images.githubusercontent.com/1484166/203631565-bc5a4083-fa67-47a8-9
 Installation:
 ```
 pip install powderworld
+
 # Or, to install locally
 git clone https://github.com/kvfrans/powderworld/
 cd powderworld
