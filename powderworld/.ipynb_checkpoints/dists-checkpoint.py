@@ -3,7 +3,7 @@ import numpy as np
 import skimage.draw
 import os
 
-saved_worlds = torch.from_numpy(np.load(os.path.join(os.path.dirname(__file__), '160worlds.npy')))
+saved_worlds = torch.from_numpy(np.load(os.path.join(os.path.dirname(__file__), '160worlds.npz'))['arr_0'].astype('float'))
 
 def lim(x):
     return np.clip(1, 63, int(x))
