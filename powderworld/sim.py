@@ -10,7 +10,8 @@ from typing import Dict,Tuple,Optional,List
  
 Info = namedtuple('Info', ['rand_movement', 'rand_interact', 'rand_element'])
 
-pw_type = torch.float16
+# pw_type = torch.float16
+pw_type = torch.float32
 
 # ================ REGISTER ELEMENTS. =================
 # Name:    ID, Density, GravityInter
@@ -84,7 +85,10 @@ def get_in_cardinal_direction(x, directions):
 
 @torch.jit.script # JIT decorator
 def interp(switch, if_false, if_true):
-#     with torch.jit.strict_fusion():
+    return (~switch)*if_false + (switch)*if_true
+
+@torch.jit.script # JIT decorator
+def interp_int(switch, if_false, if_true: int):
     return (~switch)*if_false + (switch)*if_true
 
 @torch.jit.script # JIT decorator
@@ -151,6 +155,8 @@ class PWSim(torch.nn.Module):
                 self.elem_vecs_array.weight[elem[0]] = elem_vec
 
             self.neighbor_kernel = torch.ones((1, 1, 3, 3), device=device, dtype=pw_type)
+            self.zero = torch.zeros((1,1), device=device, dtype=pw_type)
+            self.one = torch.ones((1,1), device=device, dtype=pw_type)
 
             self.up = torch.Tensor([-1,0]).to(device)[None,:,None,None]
             self.down = torch.Tensor([1,0]).to(device)[None,:,None,None]
@@ -167,24 +173,24 @@ class PWSim(torch.nn.Module):
         Overwrite this function with your own set of update rules to change behavior.
         """
         self.update_rules = [
-#             BehaviorStone(self),
-#             BehaviorMole(self),
-            BehaviorGravity(self),
-#             BehaviorSand(self),
-#             BehaviorLemming(self),
-#             BehaviorFluidFlow(self),
-#             BehaviorIce(self),
-#             BehaviorWater(self),
-#             BehaviorFire(self),
-#             BehaviorPlant(self),
-#             BehaviorLava(self),
-#             BehaviorAcid(self),
-#             BehaviorCloner(self),
-#             BehaviorFish(self),
-#             BehaviorBird(self) ,
-#             BehaviorKangaroo(self),
-#             BehaviorSnake(self),
-#             BehaviorVelocity(self),
+            # BehaviorStone(self),
+            # BehaviorMole(self),
+            # BehaviorGravity(self),
+            # BehaviorSand(self),
+            # BehaviorLemming(self),
+            # BehaviorFluidFlow(self),
+            # BehaviorIce(self),
+            # BehaviorWater(self),
+            # BehaviorFire(self),
+            # BehaviorPlant(self),
+            # BehaviorLava(self),
+            # BehaviorAcid(self),
+            # BehaviorCloner(self),
+            BehaviorFish(self),
+            # BehaviorBird(self) ,
+            # BehaviorKangaroo(self),
+            # BehaviorSnake(self),
+            # BehaviorVelocity(self),
         ]
         self.update_rules_jit = None
     
@@ -354,7 +360,7 @@ class BehaviorGravity(torch.nn.Module):
     def forward(self, world, info):
         rand_movement, rand_interact, rand_element = info
         
-        world[:, 8:9] = interp(switch=(world[:, 2:3] == 1), if_false=world[:, 8:9], if_true=0)
+        world[:, 8:9] = interp(switch=(world[:, 2:3] == 1), if_false=world[:, 8:9], if_true=self.pw.zero)
             
         above = get_above(world)
         below = get_below(world)
@@ -372,7 +378,7 @@ class BehaviorGravity(torch.nn.Module):
         does_become_above_real = get_above(does_become_below_real)
         
         world[:] = interp2(switch_a=does_become_below_real, switch_b=does_become_above_real, if_false=world, if_a=below, if_b=above)
-        world[:, 8:9] = interp(switch=does_become_above_real, if_false=world[:, 8:9], if_true=1)
+        world[:, 8:9] = interp(switch=does_become_above_real, if_false=world[:, 8:9], if_true=self.pw.one)
             
         return world
     
@@ -710,8 +716,8 @@ class BehaviorVelocity(torch.nn.Module):
                 direction_swap = self.pw.direction_func(angle, swaps)
                 match = (velocity_angle_int == angle) & is_velocity_enough & (swaps == -1) & (direction_swap == -1) & direction_empty
                 opposite_match = self.pw.direction_func((angle+4) % 8, match)
-                swaps = interp(match, swaps, angle)
-                swaps = interp(opposite_match, swaps, (angle+4) % 8)                
+                swaps = interp_int(match, swaps, angle)
+                swaps = interp_int(opposite_match, swaps, (angle+4) % 8)                
             
             velocity_field_old = velocity_field.clone()
             world[:] = interp_swaps8(swaps, world, dw[0], dw[1], dw[2], dw[3], dw[4], dw[5], dw[6], dw[7])
@@ -743,15 +749,15 @@ class BehaviorFish(torch.nn.Module):
         
         # Small issue here: the order matters because sometimes fish move twice if they roll the correct angle.
         # We could fix it by keeping track of new fish and not allowing them to move.
+        
         for angle in [0,1,2,3]:
             is_gravity = world[:, 2:3] == 1
             is_angle_match = torch.floor(rand_movement * 4) == angle
             density = world[:, 1:2]
-            is_empty_in_dir = self.pw.direction_func(angle, is_gravity & (density <= 2))
+            is_empty_in_dir = self.pw.direction_func(angle*2, is_gravity & (density <= 2))
             is_fish = self.pw.get_bool(world, "agentFish")
-            opposite_world = self.pw.direction_func(angle, world)
-            does_become_opposite = is_angle_match & is_empty_in_dir & is_fish & self.pw.direction_func(angle, ~is_fish) & (rand_interact < 0.2)
-            
+            opposite_world = self.pw.direction_func(angle*2, world)
+            does_become_opposite = is_angle_match & is_empty_in_dir & is_fish & self.pw.direction_func(angle*2, ~is_fish) & (rand_interact < 0.2)
             does_become_fish = self.pw.direction_func(((angle*2) + 4) % 8, does_become_opposite)
 
             world[:] = interp2(switch_a=does_become_fish, switch_b=does_become_opposite,
@@ -815,7 +821,7 @@ class BehaviorKangaroo(torch.nn.Module):
         is_kangaroo = self.pw.get_bool(world, "agentKangaroo")
         
         is_kangaroo_jump = is_kangaroo & (rand_element < 0.05) & get_below(density >= 3)
-        kangaroo_jump_state = interp(switch=is_kangaroo_jump, if_false=kangaroo_jump_state, if_true=1)
+        kangaroo_jump_state = interp(switch=is_kangaroo_jump, if_false=kangaroo_jump_state, if_true=self.pw.one)
         kangaroo_jump_state = interp(switch=is_kangaroo, if_false=kangaroo_jump_state, if_true=kangaroo_jump_state-0.1)
         world[:, 7:8] = kangaroo_jump_state
                 

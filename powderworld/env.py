@@ -5,11 +5,11 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from PIL import Image
-from stable_baselines3.common.vec_env.base_vec_env import VecEnv, VecEnvIndices, VecEnvObs, VecEnvStepReturn
 from enum import IntEnum
 from collections import namedtuple
 import copy
 
+from powderworld.base_vec_env import VecEnv
 import powderworld.gen
 import powderworld.rews
 from powderworld.sim import PWSim, PWRenderer, interp
@@ -35,6 +35,7 @@ class PWGenRule(IntEnum):
     SINE_WAVE = 6
     RAMPS = 7
     ARCHES = 8
+    CONTAINER = 9
     
 PWGenConfigTuple = namedtuple('PWGenConfig', ['method', 'elem', 'num', 'p1', 'p2', 'p3'])
 def PWGenConfig(method, elem, num, p1=0, p2=0, p3=0):
@@ -45,7 +46,7 @@ def PWTaskConfig():
         # General configs should be shared across all PWTasks in a PWTaskDist.
         'general': {
             'world_size': 64,
-            'obs_type': 'channels',
+            'obs_type': 'elems',
             'num_task_variations': 10000000
         },
         'agent': {
@@ -53,7 +54,8 @@ def PWTaskConfig():
             'ending_timesteps': 0,
             'num_actions': 50,
             'time_per_action': 1,
-            'agent_type': 'disembodied' # [disembodied, embodied]
+            'agent_type': 'disembodied', # [disembodied, embodied]
+            'disabled_elements': []
         },
         'state_gen': {
             'rules': [
@@ -97,34 +99,20 @@ class PWTask():
                     powderworld.gen.do_ramps(new_world, rand, rule.elem)
                 elif rule.method == PWGenRule.ARCHES:
                     powderworld.gen.do_arches(new_world, rand, rule.elem)
+                elif rule.method == PWGenRule.CONTAINER:
+                    powderworld.gen.do_container(new_world, rand, rule.elem, rule.p1, rule.p2)
         powderworld.gen.do_edges(new_world, rand)
         return new_world
-    
-    def lim(self, x):
-        return np.clip(int(x), 1, self.config['general']['world_size']-2)
-
-#     def apply_action(self, world, actions):
-#         if self.config['agent']['agent_type'] == "disembodied":
-#             elem, x, y, x_delta, y_delta, wind_dir = actions
-#             real_x = x*8 + x_delta
-#             real_y = y*8 + y_delta
-#             radius = 3
-#             # TODO: Make winddir actually correct
-#             winddir = 20 * torch.Tensor([0, 0]).to(self.pw.device)[None,:,None,None]
-#             self.pw.add_element(world[:, :, self.lim(real_x-radius):self.lim(real_x+radius), \
-#                                       self.lim(real_y-radius):self.lim(real_y+radius)], int(elem), None)
-#         else:
-#             raise "Unsupported Agent Type"
-    
+        
     def get_rew(self, world, world_before):
         rew = 0
         for rule in self.config['reward']['rules']:
             if rule.method == PWRewRule.ELEM_COUNT:
-                rew += powderworld.rews.rew_elem_exists(world, rule.elem, rule.x, rule.y) * rule.weight
+                rew += powderworld.rews.rew_elem_exists(world, rule.elem, rule.y, rule.x) * rule.weight
             elif rule.method == PWRewRule.ELEM_DESTROY:
-                rew += powderworld.rews.rew_elem_destroy(world, rule.elem, rule.x, rule.y) * rule.weight
+                rew += powderworld.rews.rew_elem_destroy(world, rule.elem, rule.y, rule.x) * rule.weight
             elif rule.method == PWRewRule.DELTA:
-                rew += powderworld.rews.rew_delta(world, world_before, rule.x, rule.y) * rule.weight
+                rew += powderworld.rews.rew_delta(world, world_before, rule.y, rule.x) * rule.weight
         return rew
 
 
@@ -136,7 +124,10 @@ class PWEnv(VecEnv):
         self.pw = PWSim(self.device, use_jit)
         self.pwr = PWRenderer(self.device)
         self.flatten_actions = flatten_actions
-        
+        self.render_mode = 'rgb_array_list'
+        self.set_attr('is_recording', False)
+        self.render_frames = []
+                
         self.tasks = []
         for n in range(self.num_envs):
             self.tasks.append(PWTask(self.pw, self.generate_task_config()))
@@ -145,7 +136,10 @@ class PWEnv(VecEnv):
         self.lim = lambda x : np.clip(int(x), 1, self.world_size-2)
 
         # Default observation_space
-        if self.tasks[0].config["general"]["obs_type"] == "channels":
+        if self.tasks[0].config["general"]["obs_type"] == "elems":
+            self.observation_space = spaces.Box(low=0., high=21, shape=(self.world_size, self.world_size), dtype=np.uint8)
+            
+        elif self.tasks[0].config["general"]["obs_type"] == "channels":
             self.observation_space = spaces.Box(low=-5., high=5., shape=(self.pw.NUM_CHANNEL, \
                                                                          self.world_size, self.world_size), dtype=np.float32)
         elif self.tasks[0].config["general"]["obs_type"] == "rgb":
@@ -164,6 +158,10 @@ class PWEnv(VecEnv):
         
     def reset(self):
         np_world = np.zeros((self.num_envs, self.world_size, self.world_size), dtype=np.uint8)
+                
+        self.tasks = []
+        for n in range(self.num_envs):
+            self.tasks.append(PWTask(self.pw, self.generate_task_config()))
         for task_iter in range(len(self.tasks)):
             np_world[task_iter:task_iter+1] = self.tasks[task_iter].reset()
             
@@ -171,15 +169,26 @@ class PWEnv(VecEnv):
         self.cpu_world = self.world.cpu().numpy()
         self.cpu_world_before = np.copy(self.cpu_world)
         
-        return self.cpu_world
+        return self.cpu_world[:,0]
         
-    def render(self, mode='rgb_array', task_id=0):
-        assert mode=='rgb_array'
-        im = self.pwr.render(self.world[task_id:task_id+1])
+    def make_img(self, world_slice):
+        im = self.pwr.render(world_slice)
         im = Image.fromarray(im)
         im = im.resize((256, 256), Image.NEAREST)
         im = np.array(im)
         return im
+    
+    def render(self, mode='rgb_array_list', task_id=0):
+        return self.render_frames
+    
+#     def render(self, mode='rgb_array_list', task_id=0):
+#         im = self.pwr.render(self.world[task_id:task_id+1])
+#         im = Image.fromarray(im)
+#         im = im.resize((256, 256), Image.NEAREST)
+#         im = np.array(im)
+#         return im
+    
+    
                     
     def step_async(self, actions):
         self.actions = actions
@@ -190,17 +199,21 @@ class PWEnv(VecEnv):
         np_bool = np.zeros((self.num_envs, 1, self.world_size, self.world_size), dtype=np.bool)
         np_wind = np.zeros((self.num_envs, 2, self.world_size, self.world_size), dtype=np.float16)
         
-        if len(actions.shape) == 1:
-            elem = actions // 64
-            x = (actions % 64) // 8
-            y = (actions % 64) % 8
+        if len(actions.shape) == 1:            
+            y, x, element_id = np.unravel_index(actions, (8, 8, 21))
+            elem = element_id
             real_x = x*8
             real_y = y*8
         else:
+            # Full MultiDiscrete
             elem = actions[:, 0]
             real_x = actions[:, 1]*8 + actions[:, 3]
             real_y = actions[:, 2]*8 + actions[:, 4]
-        
+            
+        for i, t in enumerate(self.tasks):
+            if elem[i] in t.config["agent"]["disabled_elements"]:
+                elem[i] = 0
+                        
         # Create a meshgrid of offsets
         radius = 3
         y_offset, x_offset = np.mgrid[-radius+1:radius, -radius+1:radius]
@@ -225,8 +238,10 @@ class PWEnv(VecEnv):
     # Take a step in the RL env.
     def step_wait(self):
         self.apply_action_batch()
-
         
+        is_recording = self.get_attr('is_recording')
+        self.render_frames = []
+
         self.cpu_world_before = np.copy(self.cpu_world)
         action_times = np.array([task.config["agent"]["time_per_action"] for task in self.tasks])
         for t in range(np.max(action_times)):
@@ -236,11 +251,27 @@ class PWEnv(VecEnv):
                 self.world = self.pw(self.world)
             else:
                 self.world[does_tick] = self.pw(self.world[does_tick])
+            if is_recording and does_tick[0]:
+                self.render_frames.append(self.make_img(self.world[0:1]))
 
         for task in self.tasks:
             task.num_actions_taken += 1
         dones = np.array([task.num_actions_taken >= task.config["agent"]["num_actions"] for task in self.tasks], dtype=np.bool)
         
+        # For any tasks that are finished, run forwards ending_timesteps times.
+        if dones.any():
+            done_world = self.world[dones]
+            ending_timesteps = np.array([task.config["agent"]["ending_timesteps"] for task in self.tasks])[dones]
+            for t in range(np.max(ending_timesteps)):
+                does_tick = ending_timesteps > 0 
+                ending_timesteps[does_tick] -= 1
+                if does_tick.all():
+                    done_world = self.pw(done_world)
+                else:
+                    done_world[does_tick] = self.pw(done_world[does_tick])
+                if is_recording and dones[0]:
+                    self.render_frames.append(self.make_img(done_world[0:1]))
+            self.world = done_world
         
         self.cpu_world = self.world.cpu().numpy()
         
@@ -252,18 +283,19 @@ class PWEnv(VecEnv):
             new_np_world = np.zeros((dones.sum(), self.world_size, self.world_size), dtype=np.uint8)
             for ta in range(len(self.tasks)):
                 if dones[ta]:
+                    self.tasks[ta] = PWTask(self.pw, self.generate_task_config())
                     new_np_world[ta:ta+1] = self.tasks[ta].reset()
             self.world[dones] = self.pw.np_to_pw(new_np_world)
                 
-        obs = self.cpu_world
+        obs = self.cpu_world[:,0]
         info = [{}] * self.num_envs
         return obs, rews, dones, info
     
     def get_attr(self, attr_name, indices=None):
-        return None
+        return getattr(self, attr_name)
 
     def set_attr(self, attr_name, value, indices=None):
-        return None
+        setattr(self, attr_name, value)
 
     def env_method(self, method_name, *method_args, indices=None, **method_kwargs):
         return None
