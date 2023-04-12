@@ -84,7 +84,7 @@ def update_process(q, sharedMessage):
                     else:
                         pw.add_element(world[:, :, y-3:y+3, x-3:x+3], block, wind)
             else:
-                world = pw(world, do_skips=False)
+                world = pw(world, do_skips=True)
                 img = pwr.render(world)
 
                 im = Image.fromarray(img.astype("uint8"))

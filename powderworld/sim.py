@@ -10,8 +10,8 @@ from typing import Dict,Tuple,Optional,List
  
 Info = namedtuple('Info', ['rand_movement', 'rand_interact', 'rand_element'])
 
-# pw_type = torch.float16
-pw_type = torch.float32
+pw_type = torch.float16
+# pw_type = torch.float32
 
 # ================ REGISTER ELEMENTS. =================
 # Name:    ID, Density, GravityInter
@@ -173,24 +173,24 @@ class PWSim(torch.nn.Module):
         Overwrite this function with your own set of update rules to change behavior.
         """
         self.update_rules = [
-            # BehaviorStone(self),
-            # BehaviorMole(self),
-            # BehaviorGravity(self),
-            # BehaviorSand(self),
-            # BehaviorLemming(self),
-            # BehaviorFluidFlow(self),
-            # BehaviorIce(self),
-            # BehaviorWater(self),
-            # BehaviorFire(self),
-            # BehaviorPlant(self),
-            # BehaviorLava(self),
-            # BehaviorAcid(self),
-            # BehaviorCloner(self),
+            BehaviorStone(self),
+            BehaviorMole(self),
+            BehaviorGravity(self),
+            BehaviorSand(self),
+            BehaviorLemming(self),
+            BehaviorFluidFlow(self),
+            BehaviorIce(self),
+            BehaviorWater(self),
+            BehaviorFire(self),
+            BehaviorPlant(self),
+            BehaviorLava(self),
+            BehaviorAcid(self),
+            BehaviorCloner(self),
             BehaviorFish(self),
-            # BehaviorBird(self) ,
-            # BehaviorKangaroo(self),
-            # BehaviorSnake(self),
-            # BehaviorVelocity(self),
+            BehaviorBird(self) ,
+            BehaviorKangaroo(self),
+            BehaviorSnake(self),
+            BehaviorVelocity(self),
         ]
         self.update_rules_jit = None
     
@@ -549,7 +549,7 @@ class BehaviorFire(torch.nn.Module):
         does_burn_wood = self.pw.get_bool(world, "wood") & (burn_chance < 0.05)
         does_burn_bird = self.pw.get_bool(world, "agentBird") & (burn_chance < 0.05)
         does_burn_plant = self.pw.get_bool(world, "plant") & (burn_chance < 0.2)
-        does_burn_agent = (self.pw.get_bool(world, "agentFish") | self.pw.get_bool(world, "agentKangaroo") | self.pw.get_bool(world, "agentMole")) & (burn_chance < 0.2)
+        does_burn_agent = (self.pw.get_bool(world, "agentFish") | self.pw.get_bool(world, "agentLemming") | self.pw.get_bool(world, "agentKangaroo") | self.pw.get_bool(world, "agentMole")) & (burn_chance < 0.2)
         does_burn_gas = self.pw.get_bool(world, "gas") & (burn_chance < 0.2)
         does_burn_dust = self.pw.get_bool(world, "dust")
         does_burn_ice = self.pw.get_bool(world, "ice") & (burn_chance < 0.2) & has_fire_neighbor
@@ -572,7 +572,7 @@ class BehaviorFire(torch.nn.Module):
         #Fire spread. (Fire+burnable, or Lava)=> creates a probability to spread to air.
         burnables = self.pw.get_elem(world, "wood") + self.pw.get_elem(world, "plant") + self.pw.get_elem(world, "gas") + \
             self.pw.get_elem(world, "dust") + self.pw.get_bool(world, "agentFish") + self.pw.get_bool(world, "agentBird") + \
-            self.pw.get_bool(world, "agentKangaroo") + self.pw.get_bool(world, "agentMole")
+            self.pw.get_bool(world, "agentKangaroo") + self.pw.get_bool(world, "agentMole") + self.pw.get_bool(world, "agentLemming")
         fire_with_burnable_neighbor = F.conv2d(burnables, self.pw.neighbor_kernel, padding=1) * fire_and_lava
         in_fire_range = F.conv2d(fire_with_burnable_neighbor + self.pw.get_elem(world, "lava"), self.pw.neighbor_kernel, padding=1)
         does_burn_empty = self.pw.get_bool(world, "empty") & (in_fire_range > 0) & (burn_chance < 0.3)

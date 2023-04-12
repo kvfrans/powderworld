@@ -54,7 +54,7 @@ def parse_args():
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=256,
         help="the number of steps to run in each environment per policy rollout")
-    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--gamma", type=float, default=0.999,
         help="the discount factor gamma")
@@ -68,7 +68,7 @@ def parse_args():
         help="Toggles advantages normalization")
     parser.add_argument("--clip-coef", type=float, default=0.2,
         help="the surrogate clipping coefficient")
-    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
     parser.add_argument("--ent-coef", type=float, default=0.01,
         help="coefficient of the entropy")
@@ -284,11 +284,13 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(envs.reset()).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
+    
+    rew_normalize_mean = None
+    rew_normalize_std = None
 
     for update in range(1, num_updates + 1):
         start_time_update = time.time()
-        avg_ret = 0
-        avg_ret_count = 0
+        env_returns = []
         
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -329,15 +331,22 @@ if __name__ == "__main__":
 
             for item in info:
                 if "episode" in item.keys():
-                    avg_ret += item["episode"]["r"]
-                    avg_ret_count += 1
+                    env_returns.append(item["episode"]["r"])
                     writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
+                    # writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
                     break
+                    
+        if update == 1:
+            rew_normalize_mean = np.array([env_returns]).mean()
+            rew_normalize_std = max(1, np.array([env_returns]).std() + 0.001)
         
-        if avg_ret_count > 0:
-            print(f"global_step={global_step}, avg_return={avg_ret/avg_ret_count}")
-            writer.add_scalar("charts/avg_return_empirical", avg_ret/avg_ret_count, global_step)
+        if len(env_returns) > 0:
+            env_rew_mean = np.array([env_returns]).mean()
+            print(f"global_step={global_step}, avg_return={env_rew_mean}")
+            writer.add_scalar("charts/avg_return_empirical", env_rew_mean, global_step)
+            writer.add_scalar("charts/avg_return_empirical_normalized", (env_rew_mean - rew_normalize_mean) / rew_normalize_std, global_step)
+            # Note: normalized log here is only for debugging. Because the means/std are computed on-the-fly, 
+            # you can't compare it between environments or between runs.
 
         # bootstrap value if not done
         with torch.no_grad():

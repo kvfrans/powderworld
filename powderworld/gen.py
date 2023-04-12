@@ -253,3 +253,10 @@ def do_arches(world, rand, elem):
 def do_container(world, rand, elem, y, x):
     add_elem(world[:, y*16:y*16+16, x*16:x*16+16], elem)
     add_elem(world[:, y*16:y*16+15, x*16+1:x*16+15], 'empty')
+    
+def do_filled_box(world, rand, elem, y, x):
+    add_elem(world[:, y*16:y*16+16, x*16:x*16+16], elem)
+
+def do_small_circle(world, rand, elem, y, x):
+    rr, cc = skimage.draw.disk((y*16+8, x*16+8), 4, shape=(world.shape[1], world.shape[2]))
+    add_elem_rc(world, rr, cc, elem)

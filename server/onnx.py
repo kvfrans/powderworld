@@ -1,11 +1,11 @@
 import torch.onnx
 import torch
 import numpy as np
-import powderworld.dists
+import powderworld.gen
 from powderworld import PWSim, PWRenderer
 
 device = 'cuda'
-world = torch.zeros((1, 64, 128, 20), dtype=torch.float32, device=device)
+world = torch.zeros((1, 64, 128, 9), dtype=torch.float32, device=device)
 
 class PwTranspose(torch.nn.Module):
     def __init__(self, device):
@@ -32,10 +32,11 @@ print("Running PW Compile Check")
 pw = PwTranspose(device)
 pwr = PwrTranspose(device)
 
-
-world = torch.zeros((4, pw.pw.NUM_CHANNEL, 64, 128), dtype=torch.float32, device=device)
+np_world = np.zeros((4, 64, 128), dtype=np.uint8)
 for b in range(4):
-    powderworld.dists.make_world(pw.pw, world[b:b+1], num_lines=5, num_circles=0, num_squares=0)
+    np_world[b:b+1] = powderworld.gen.init_world(64, 128)
+
+world = pw.pw.np_to_pw(np_world)
 world = world.permute(0,2,3,1)
 world2_torch = pw(torch.clone(world))
 render_torch = pwr(world2_torch)

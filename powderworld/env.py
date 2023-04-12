@@ -36,10 +36,14 @@ class PWGenRule(IntEnum):
     RAMPS = 7
     ARCHES = 8
     CONTAINER = 9
+    FILLED_BOX = 10
+    SMALL_CIRCLE = 11
     
 PWGenConfigTuple = namedtuple('PWGenConfig', ['method', 'elem', 'num', 'p1', 'p2', 'p3'])
 def PWGenConfig(method, elem, num, p1=0, p2=0, p3=0):
     return PWGenConfigTuple(method, elem, num, p1, p2, p3)
+def PWGenConfig(method, elem, num, y=0, x=0):
+    return PWGenConfigTuple(method, elem, num, y, x, 0)
 
 def PWTaskConfig():
     return {
@@ -101,6 +105,10 @@ class PWTask():
                     powderworld.gen.do_arches(new_world, rand, rule.elem)
                 elif rule.method == PWGenRule.CONTAINER:
                     powderworld.gen.do_container(new_world, rand, rule.elem, rule.p1, rule.p2)
+                elif rule.method == PWGenRule.FILLED_BOX:
+                    powderworld.gen.do_filled_box(new_world, rand, rule.elem, rule.p1, rule.p2)
+                elif rule.method == PWGenRule.SMALL_CIRCLE:
+                    powderworld.gen.do_small_circle(new_world, rand, rule.elem, rule.p1, rule.p2)
         powderworld.gen.do_edges(new_world, rand)
         return new_world
         
@@ -229,10 +237,10 @@ class PWEnv(VecEnv):
         # Use advanced indexing to set the values in np_world
         np_world[np.arange(self.num_envs)[:, None, None], y_coords, x_coords] = elem[:, None, None]
         np_bool[np.arange(self.num_envs)[:, None, None], :, y_coords, x_coords] = True
-        
+                
         world_bool = torch.from_numpy(np_bool).to(self.device)
         world_delta = self.pw.np_to_pw(np_world)
-        self.world = interp(world_bool, self.world, world_delta)
+        self.world = interp(world_bool & ~self.pw.get_bool(self.world, 'wall'), self.world, world_delta)
         
 
     # Take a step in the RL env.
