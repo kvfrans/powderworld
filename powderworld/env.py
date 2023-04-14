@@ -12,7 +12,7 @@ import copy
 from powderworld.base_vec_env import VecEnv
 import powderworld.gen
 import powderworld.rews
-from powderworld.sim import PWSim, PWRenderer, interp
+from powderworld.sim import PWSim, PWRenderer, interp, pw_elements
 
 
 class PWRewRule(IntEnum):
@@ -68,9 +68,10 @@ def PWTaskConfig():
             'seed': 0,
         },
         'reward': {
-            'rules': [
+            # 'rules': [
                 # PWRewConfig(PWRewRule.ELEM_COUNT, "sand", weight=1, x=3, y=3)
-            ],
+            # ],
+            'matrix': np.zeros((64, 64, 2)), # [ElementID + Weight].
             'dense_reward_ratio': 0.1,
         }
     }
@@ -111,17 +112,6 @@ class PWTask():
                     powderworld.gen.do_small_circle(new_world, rand, rule.elem, rule.p1, rule.p2)
         powderworld.gen.do_edges(new_world, rand)
         return new_world
-        
-    def get_rew(self, world, world_before):
-        rew = 0
-        for rule in self.config['reward']['rules']:
-            if rule.method == PWRewRule.ELEM_COUNT:
-                rew += powderworld.rews.rew_elem_exists(world, rule.elem, rule.y, rule.x) * rule.weight
-            elif rule.method == PWRewRule.ELEM_DESTROY:
-                rew += powderworld.rews.rew_elem_destroy(world, rule.elem, rule.y, rule.x) * rule.weight
-            elif rule.method == PWRewRule.DELTA:
-                rew += powderworld.rews.rew_delta(world, world_before, rule.y, rule.x) * rule.weight
-        return rew
 
 
 class PWEnv(VecEnv):
@@ -145,7 +135,7 @@ class PWEnv(VecEnv):
 
         # Default observation_space
         if self.tasks[0].config["general"]["obs_type"] == "elems":
-            self.observation_space = spaces.Box(low=0., high=21, shape=(self.world_size, self.world_size), dtype=np.uint8)
+            self.observation_space = spaces.Box(low=0., high=21, shape=(5, self.world_size, self.world_size), dtype=np.uint8)
             
         elif self.tasks[0].config["general"]["obs_type"] == "channels":
             self.observation_space = spaces.Box(low=-5., high=5., shape=(self.pw.NUM_CHANNEL, \
@@ -166,18 +156,19 @@ class PWEnv(VecEnv):
         
     def reset(self):
         np_world = np.zeros((self.num_envs, self.world_size, self.world_size), dtype=np.uint8)
-                
+        
+        self.reward_matrices = torch.zeros((self.num_envs, 64, 64, 2), device=self.device)
         self.tasks = []
         for n in range(self.num_envs):
             self.tasks.append(PWTask(self.pw, self.generate_task_config()))
         for task_iter in range(len(self.tasks)):
             np_world[task_iter:task_iter+1] = self.tasks[task_iter].reset()
+            self.reward_matrices[task_iter] = torch.from_numpy(self.tasks[task_iter].config['reward']['matrix'])
             
         self.world = self.pw.np_to_pw(np_world).clone()
         self.cpu_world = self.world.cpu().numpy()
-        self.cpu_world_before = np.copy(self.cpu_world)
         
-        return self.cpu_world[:,0]
+        return self.get_obs()
         
     def make_img(self, world_slice):
         im = self.pwr.render(world_slice)
@@ -187,16 +178,7 @@ class PWEnv(VecEnv):
         return im
     
     def render(self, mode='rgb_array_list', task_id=0):
-        return self.render_frames
-    
-#     def render(self, mode='rgb_array_list', task_id=0):
-#         im = self.pwr.render(self.world[task_id:task_id+1])
-#         im = Image.fromarray(im)
-#         im = im.resize((256, 256), Image.NEAREST)
-#         im = np.array(im)
-#         return im
-    
-    
+        return self.render_frames    
                     
     def step_async(self, actions):
         self.actions = actions
@@ -242,15 +224,37 @@ class PWEnv(VecEnv):
         world_delta = self.pw.np_to_pw(np_world)
         self.world = interp(world_bool & ~self.pw.get_bool(self.world, 'wall'), self.world, world_delta)
         
+    def get_rew_batch(self):
+        reward_elems = self.reward_matrices[:, :, :, 0]
+        reward_weight = self.reward_matrices[:, :, :, 1]
+        world_elems = self.world[:, 0]
+        matching_elems = (reward_elems == world_elems)
+        scaled_elems = matching_elems * reward_weight
+        
+        total_rew = torch.sum(scaled_elems, dim=(1,2))
+        total_rew /= torch.sum(torch.abs(reward_weight), dim=(1,2))
+        return total_rew
+        
+    def get_obs(self):
+        world_elems = self.cpu_world[:,0:1]
+        reward_matrices = self.reward_matrices.permute((0,3,1,2)).cpu().numpy()
+        percent_done = np.array([task.num_actions_taken / (task.config["agent"]["num_actions"]) for task in self.tasks])
+        is_done = (percent_done == 1).astype(float)
+        
+        matrix_percent_done = np.tile(percent_done[:, np.newaxis, np.newaxis, np.newaxis], (1, 1, 64, 64))
+        matrix_is_done = np.tile(is_done[:, np.newaxis, np.newaxis, np.newaxis], (1, 1, 64, 64))
+        # print(world_elems.shape, matrix_percent_done.shape, matrix_is_done.shape)
+        
+        return np.concatenate([world_elems, reward_matrices, matrix_percent_done, matrix_is_done], axis=1)
+        
 
     # Take a step in the RL env.
     def step_wait(self):
-        self.apply_action_batch()
-        
         is_recording = self.get_attr('is_recording')
         self.render_frames = []
 
-        self.cpu_world_before = np.copy(self.cpu_world)
+        # 1. Apply the actions.
+        self.apply_action_batch()
         action_times = np.array([task.config["agent"]["time_per_action"] for task in self.tasks])
         for t in range(np.max(action_times)):
             does_tick = action_times > 0
@@ -262,11 +266,12 @@ class PWEnv(VecEnv):
             if is_recording and does_tick[0]:
                 self.render_frames.append(self.make_img(self.world[0:1]))
 
+        # 2. Check if tasks are finished.
         for task in self.tasks:
             task.num_actions_taken += 1
         dones = np.array([task.num_actions_taken >= task.config["agent"]["num_actions"] for task in self.tasks], dtype=np.bool)
         
-        # For any tasks that are finished, run forwards ending_timesteps times.
+        # 3. For any tasks that are finished, run forwards ending_timesteps times.
         if dones.any():
             done_world = self.world[dones]
             ending_timesteps = np.array([task.config["agent"]["ending_timesteps"] for task in self.tasks])[dones]
@@ -281,21 +286,25 @@ class PWEnv(VecEnv):
                     self.render_frames.append(self.make_img(done_world[0:1]))
             self.world = done_world
         
-        self.cpu_world = self.world.cpu().numpy()
-        
-        rews = np.array([self.tasks[ta].get_rew(self.cpu_world[ta:ta+1], self.cpu_world_before[ta:ta+1]) for ta in range(len(self.tasks))])
+        # 4. Calculate rewards.
+        rews = self.get_rew_batch().cpu().numpy()
         ratios = np.array([task.config["reward"]["dense_reward_ratio"] if ~dones[ta] else 1 for ta, task in enumerate(self.tasks)])
         rews = rews * ratios
         
+        # 5. If tasks are done, instantiate new tasks.
         if dones.any():
             new_np_world = np.zeros((dones.sum(), self.world_size, self.world_size), dtype=np.uint8)
+            done_counter = 0
             for ta in range(len(self.tasks)):
                 if dones[ta]:
                     self.tasks[ta] = PWTask(self.pw, self.generate_task_config())
-                    new_np_world[ta:ta+1] = self.tasks[ta].reset()
+                    new_np_world[done_counter:done_counter+1] = self.tasks[ta].reset()
+                    done_counter += 1
+                    self.reward_matrices[ta] = torch.from_numpy(self.tasks[ta].config['reward']['matrix'])
             self.world[dones] = self.pw.np_to_pw(new_np_world)
                 
-        obs = self.cpu_world[:,0]
+        self.cpu_world = self.world.cpu().numpy()
+        obs = self.get_obs()
         info = [{}] * self.num_envs
         return obs, rews, dones, info
     

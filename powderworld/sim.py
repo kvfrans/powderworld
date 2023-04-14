@@ -10,7 +10,7 @@ from typing import Dict,Tuple,Optional,List
  
 Info = namedtuple('Info', ['rand_movement', 'rand_interact', 'rand_element'])
 
-pw_type = torch.float16
+# pw_type = torch.float16
 # pw_type = torch.float32
 
 # ================ REGISTER ELEMENTS. =================
@@ -126,6 +126,8 @@ class PWSim(torch.nn.Module):
     def __init__(self, device, use_jit=True):
         with torch.no_grad():
             super().__init__()
+            if isinstance(device, str):
+                device = torch.device(device)
             self.device = device
             self.use_jit = use_jit
 
@@ -142,10 +144,11 @@ class PWSim(torch.nn.Module):
             # MoleDirection
             # SnakeDirection.       SnakeEnergy
             self.NUM_CHANNEL = 1 + 1 + 1 + 2 + 1 + 3
+            self.pw_type = torch.float16 if 'cuda' in device.type else torch.float32
 
             # ================ TORCH KERNELS =================
             self.elem_vecs = {}
-            self.elem_vecs_array = nn.Embedding(self.NUM_ELEMENTS, self.NUM_CHANNEL, device=device, dtype=pw_type)
+            self.elem_vecs_array = nn.Embedding(self.NUM_ELEMENTS, self.NUM_CHANNEL, device=device, dtype=self.pw_type)
             for elem_name, elem in self.elements.items():
                 elem_vec = torch.zeros(self.NUM_CHANNEL, device=device)
                 elem_vec[0] = elem[0]
@@ -154,9 +157,9 @@ class PWSim(torch.nn.Module):
                 self.elem_vecs[elem_name] = elem_vec[None, :, None, None]
                 self.elem_vecs_array.weight[elem[0]] = elem_vec
 
-            self.neighbor_kernel = torch.ones((1, 1, 3, 3), device=device, dtype=pw_type)
-            self.zero = torch.zeros((1,1), device=device, dtype=pw_type)
-            self.one = torch.ones((1,1), device=device, dtype=pw_type)
+            self.neighbor_kernel = torch.ones((1, 1, 3, 3), device=device, dtype=self.pw_type)
+            self.zero = torch.zeros((1,1), device=device, dtype=self.pw_type)
+            self.one = torch.ones((1,1), device=device, dtype=self.pw_type)
 
             self.up = torch.Tensor([-1,0]).to(device)[None,:,None,None]
             self.down = torch.Tensor([1,0]).to(device)[None,:,None,None]
@@ -212,18 +215,22 @@ class PWSim(torch.nn.Module):
             element_name = self.element_names[element_name]
         world_slice[:,:,rr,cc] = self.elem_vecs[element_name]
         
+    def id_to_pw(self, world_ids):
+        with torch.no_grad():
+            world = self.elem_vecs_array(world_ids)
+            world = torch.permute(world, (0,3,1,2))
+            return world
+        
     def np_to_pw(self, np_world):
         with torch.no_grad():
             np_world_ids = torch.from_numpy(np_world).int().to(self.device)
-            world = self.elem_vecs_array(np_world_ids)
-            world = torch.permute(world, (0,3,1,2))
-            return world
+            return self.id_to_pw(np_world_ids)
 
     
     # =========== UPDATE HELPERS ====================
     def get_elem(self, world, elemname):
         elem_id = self.elements[elemname][0]
-        return (world[:, 0:1] == elem_id).to(pw_type)
+        return (world[:, 0:1] == elem_id).to(self.pw_type)
     
     def get_bool(self, world, elemname):
         elem_id = self.elements[elemname][0]
@@ -250,9 +257,9 @@ class PWSim(torch.nn.Module):
     def forward(self, world, do_skips=False):
         with torch.no_grad():
             # Helper Functions
-            rand_movement = torch.rand((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=pw_type, device=self.device) # For gravity, flowing.
-            rand_interact = torch.rand((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=pw_type, device=self.device) # For element-wise int.
-            rand_element = torch.rand((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=pw_type, device=self.device) # For self-element.
+            rand_movement = torch.rand((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=self.pw_type, device=self.device) # For gravity
+            rand_interact = torch.rand((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=self.pw_type, device=self.device) # For element-wise
+            rand_element = torch.rand((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=self.pw_type, device=self.device) # For self-element.
 
             info = (rand_movement, rand_interact, rand_element)
             
@@ -286,6 +293,9 @@ class PWRenderer(torch.nn.Module):
     def __init__(self, device):
         with torch.no_grad():
             super().__init__()
+            if isinstance(device, str):
+                device = torch.device(device)
+            pw_type = torch.float16 if 'cuda' in device.type else torch.float32
             self.elem_vecs_array = nn.Embedding(len(pw_elements), 3, device=device)
             self.elem_vecs_array.weight.data = (torch.Tensor([
                 [236, 240, 241], #EMPTY #ECF0F1
@@ -435,7 +445,7 @@ class BehaviorStone(torch.nn.Module):
     def __init__(self, pw):
         super().__init__()
         self.pw = pw
-        self.stone_kernel = torch.zeros((1,1,3,3), device=self.pw.device, dtype=pw_type)
+        self.stone_kernel = torch.zeros((1,1,3,3), device=self.pw.device, dtype=self.pw.pw_type)
         self.stone_kernel[0, 0, 0, 0] = 1
         self.stone_kernel[0, 0, 0, 2] = 1
     def check_filter(self, world):
@@ -457,7 +467,7 @@ class BehaviorFluidFlow(torch.nn.Module):
         return True
     def forward(self, world, info):
         rand_movement, rand_interact, rand_element = info
-        new_fluid_momentum = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=pw_type, device=self.pw.device)
+        new_fluid_momentum = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=self.pw.pw_type, device=self.pw.device)
         for fallLeft in [True, False]:
             get_in_dir = get_left if fallLeft else get_right
             get_in_not_dir = get_right if fallLeft else get_left
@@ -710,7 +720,7 @@ class BehaviorVelocity(torch.nn.Module):
             for angle in [0,1,2,3,4,5,6,7]:
                 dw.append(self.pw.direction_func(angle, world))
                 
-            swaps = -torch.ones((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=pw_type, device=self.pw.device)
+            swaps = -torch.ones((world.shape[0], 1, world.shape[2], world.shape[3]), dtype=self.pw.pw_type, device=self.pw.device)
             for angle in [0,1,2,3,4,5,6,7]:
                 direction_empty = self.pw.get_bool(dw[angle], "empty")
                 direction_swap = self.pw.direction_func(angle, swaps)
@@ -773,8 +783,8 @@ class BehaviorBird(torch.nn.Module):
         super().__init__()
         self.pw = pw
         self.obstacle_kernel = torch.cat([(torch.arange(7)-3)[None, None, :, None].expand(1, 1, 7,7),
-                                          (torch.arange(7)-3)[None, None, None, :].expand(1, 1, 7,7)], dim=0).to(self.pw.device).to(pw_type)
-        self.flocking_kernel = torch.ones((2,2,13,13), device=self.pw.device, dtype=pw_type)
+                                          (torch.arange(7)-3)[None, None, None, :].expand(1, 1, 7,7)], dim=0).to(self.pw.device).to(self.pw.pw_type)
+        self.flocking_kernel = torch.ones((2,2,13,13), device=self.pw.device, dtype=self.pw.pw_type)
         self.flocking_kernel[1,0] = 0
         self.flocking_kernel[0,1] = 0
         self.flocking_kernel[:,:,3,3] = 0
@@ -790,7 +800,7 @@ class BehaviorBird(torch.nn.Module):
         bird_vel = interp(switch=is_empty_bird, if_false=bird_vel, if_true=random_dirs)
 
         
-        not_empty = (~self.pw.get_bool(world, "empty")).to(pw_type)
+        not_empty = (~self.pw.get_bool(world, "empty")).to(self.pw.pw_type)
         vel_delta_obstacle = -F.conv2d(not_empty, self.obstacle_kernel, padding=3)
         vel_delta_flocking = 1 * F.conv2d(bird_vel * self.pw.get_elem(world, "agentBird"), self.flocking_kernel, padding=6)
         
@@ -851,7 +861,7 @@ class BehaviorMole(torch.nn.Module):
         
         density = world[:, 1:2]
         is_beetle_num = self.pw.get_elem(world, "agentMole")
-        has_supports = F.conv2d((density >= 3).to(pw_type), self.pw.neighbor_kernel, padding=1)
+        has_supports = F.conv2d((density >= 3).to(self.pw.pw_type), self.pw.neighbor_kernel, padding=1)
         world[:, 2:3] = (1-is_beetle_num)*world[:, 2:3] + is_beetle_num*(has_supports < 2)
         
                         
@@ -940,8 +950,8 @@ class BehaviorSnake(torch.nn.Module):
         
         does_become_trail = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.pw.device, dtype=torch.bool)
         does_become_snake = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.pw.device, dtype=torch.bool)
-        dir_snake_came_from = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.pw.device, dtype=pw_type)
-        ones = torch.ones((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.pw.device, dtype=pw_type)
+        dir_snake_came_from = torch.zeros((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.pw.device, dtype=self.pw.pw_type)
+        ones = torch.ones((world.shape[0], 1, world.shape[2], world.shape[3]), device=self.pw.device, dtype=self.pw.pw_type)
         
         does_turn = (rand_movement < 0.1)
         

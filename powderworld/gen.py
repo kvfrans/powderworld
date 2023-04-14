@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import skimage.draw
 import os
-from powderworld.sim import pw_elements, pw_type
+from powderworld.sim import pw_elements
 
 def lim(world_size, x):
     return np.clip(int(x), 0, world_size-1)
@@ -251,12 +251,12 @@ def do_arches(world, rand, elem):
     add_elem_mask(world, mask, elem)
 
 def do_container(world, rand, elem, y, x):
-    add_elem(world[:, y*16:y*16+16, x*16:x*16+16], elem)
-    add_elem(world[:, y*16:y*16+15, x*16+1:x*16+15], 'empty')
+    add_elem(world[:, y:y+16, x:x+16], elem)
+    add_elem(world[:, y:y+15, x+1:x+15], 'empty')
     
 def do_filled_box(world, rand, elem, y, x):
-    add_elem(world[:, y*16:y*16+16, x*16:x*16+16], elem)
+    add_elem(world[:, y:y+16, x:x+16], elem)
 
 def do_small_circle(world, rand, elem, y, x):
-    rr, cc = skimage.draw.disk((y*16+8, x*16+8), 4, shape=(world.shape[1], world.shape[2]))
+    rr, cc = skimage.draw.disk((y, x), 4, shape=(world.shape[1], world.shape[2]))
     add_elem_rc(world, rr, cc, elem)

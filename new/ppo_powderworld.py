@@ -132,11 +132,11 @@ class ConvSequence(nn.Module):
 class Agent(nn.Module):
     def __init__(self, envs, args):
         super().__init__()
-        h, w = envs.single_observation_space.shape
-        self.element_embed = nn.Embedding(num_embeddings=len(pw_elements), embedding_dim=32)
-        shape = (32, h, w)
+        _, h, w = envs.single_observation_space.shape
+        self.element_embed = nn.Embedding(num_embeddings=len(pw_elements), embedding_dim=16)
+        shape = (16+16+3, h, w)
         conv_seqs = []
-        for out_channels in [16, 32, 32]:
+        for out_channels in [32, 32, 32]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
@@ -170,10 +170,14 @@ class Agent(nn.Module):
         self.critic = layer_init(nn.Linear(256, 1), std=1)
         
     def parse_obs(self, x):
-        # "bhw" -> "bchw"
-        x = self.element_embed(x.int())
-        x = x.permute((0,3,1,2))
-        return self.network(x)
+        # x = [Elem, Goal, GoalWeight, TimeLeft, IsDone]
+        elems = self.element_embed(x[:,0].int())
+        elems = elems.permute((0,3,1,2))
+        goal_elems = self.element_embed(x[:,1].int())
+        goal_elems = goal_elems.permute((0,3,1,2))
+        full_obs = torch.concat([elems, goal_elems, x[:, 2:]], dim=1)
+        
+        return self.network(full_obs)
 
     def get_value(self, x):
         return self.critic(self.parse_obs(x))
@@ -344,7 +348,7 @@ if __name__ == "__main__":
             env_rew_mean = np.array([env_returns]).mean()
             print(f"global_step={global_step}, avg_return={env_rew_mean}")
             writer.add_scalar("charts/avg_return_empirical", env_rew_mean, global_step)
-            writer.add_scalar("charts/avg_return_empirical_normalized", (env_rew_mean - rew_normalize_mean) / rew_normalize_std, global_step)
+            # writer.add_scalar("charts/avg_return_empirical_normalized", (env_rew_mean - rew_normalize_mean) / rew_normalize_std, global_step)
             # Note: normalized log here is only for debugging. Because the means/std are computed on-the-fly, 
             # you can't compare it between environments or between runs.
 
