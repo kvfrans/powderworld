@@ -144,7 +144,8 @@ class PWSim(torch.nn.Module):
             # MoleDirection
             # SnakeDirection.       SnakeEnergy
             self.NUM_CHANNEL = 1 + 1 + 1 + 2 + 1 + 3
-            self.pw_type = torch.float16 if 'cuda' in device.type else torch.float32
+            # self.pw_type = torch.float16 if 'cuda' in device.type else torch.float32
+            self.pw_type = torch.float32
 
             # ================ TORCH KERNELS =================
             self.elem_vecs = {}
@@ -295,7 +296,8 @@ class PWRenderer(torch.nn.Module):
             super().__init__()
             if isinstance(device, str):
                 device = torch.device(device)
-            pw_type = torch.float16 if 'cuda' in device.type else torch.float32
+            # pw_type = torch.float16 if 'cuda' in device.type else torch.float32
+            pw_type = torch.float32
             self.elem_vecs_array = nn.Embedding(len(pw_elements), 3, device=device)
             self.elem_vecs_array.weight.data = (torch.Tensor([
                 [236, 240, 241], #EMPTY #ECF0F1
@@ -328,18 +330,20 @@ class PWRenderer(torch.nn.Module):
     def forward(self, world):
         with torch.no_grad():
             img = self.elem_vecs_array(world[0:1, 0].int())[0].permute(2,0,1)
-            velocity_field = world[0, 3:5]
-            velocity_field_magnitudes = torch.norm(velocity_field, dim=0)[None]
+            if world.shape[1] > 1:
+                velocity_field = world[0, 3:5]
+                velocity_field_magnitudes = torch.norm(velocity_field, dim=0)[None]
 
-            velocity_field_angles_raw = (1/(2*torch.pi)) * torch.acos(velocity_field[1] / (velocity_field_magnitudes+0.001))
-            is_y_lessthan_zero = (velocity_field[0] < 0)
-            velocity_field_angles_raw = interp(switch=is_y_lessthan_zero, if_false=velocity_field_angles_raw, if_true=(1 - velocity_field_angles_raw))
-            velocity_field_angles = velocity_field_angles_raw
-            
-            velocity_field_colors = self.vector_color_kernel
+                velocity_field_angles_raw = (1/(2*torch.pi)) * torch.acos(velocity_field[1] / (velocity_field_magnitudes+0.001))
+                is_y_lessthan_zero = (velocity_field[0] < 0)
+                velocity_field_angles_raw = interp(switch=is_y_lessthan_zero, if_false=velocity_field_angles_raw, \
+                                                   if_true=(1 - velocity_field_angles_raw))
+                velocity_field_angles = velocity_field_angles_raw
 
-            velocity_field_display = torch.clamp(velocity_field_magnitudes/5, 0, 0.5)
-            img = (1-velocity_field_display)*img + velocity_field_display*velocity_field_colors
+                velocity_field_colors = self.vector_color_kernel
+
+                velocity_field_display = torch.clamp(velocity_field_magnitudes/5, 0, 0.5)
+                img = (1-velocity_field_display)*img + velocity_field_display*velocity_field_colors
             img = torch.clamp(img, 0, 1)
             return img
     def render(self, world):

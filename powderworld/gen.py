@@ -109,7 +109,7 @@ def do_cloner_circle(world, rand, elem):
             break
             
 # Behavior to make square boxes. Don't overlap any elements.
-def do_boxes(world, rand, elem, empty_roof):
+def do_boxes(world, rand, elem):
     lim_y = lim_gen(world.shape[1])
     lim_x = lim_gen(world.shape[2])
     for t in range(10):
@@ -120,14 +120,15 @@ def do_boxes(world, rand, elem, empty_roof):
         mask = np.zeros(world.shape, bool)
         mask[:, lim_y(y1-radius):lim_y(y1+radius), lim_x(x1-radius):lim_x(x1+radius)] = True
         mask[:, lim_y(y1-radius_small):lim_y(y1+radius_small), lim_x(x1-radius_small):lim_x(x1+radius_small)] = False
-        if empty_roof:
-            mask[:, lim_y(y1-radius):lim_y(y1+radius_small), lim_x(x1-radius_small):lim_x(x1+radius_small)] = False
+        # if empty_roof:
+        #     mask[:, lim_y(y1-radius):lim_y(y1+radius_small), lim_x(x1-radius_small):lim_x(x1+radius_small)] = False
         if world[mask].sum() <= 10:
             add_elem_mask(world, mask, elem)
             break
             
 # Behavior to fill in a slice of the map.
-def do_fill_slice(world, rand, elem, direc):
+def do_fill_slice(world, rand, elem):
+    direc = rand.randint(0,4)
     if direc == 0:
         amount = rand.randint(1, int(world.shape[1]/3))
         add_elem(world[:, :amount, :], elem)
@@ -147,7 +148,7 @@ def do_cloner_roof(world, rand, elem):
     add_elem(world[:,3:6,:], elem)
         
 # Behavior to make a sine wave. May overlap.
-def do_sine_wave(world, rand, elem, y_range=[10, 20]):
+def do_sine_wave(world, rand, elem, y_range=[10, 40]):
     elem_id = pw_elements[elem][0]
     center_x = rand.randint(world.shape[2])
     spread_x = rand.randint(world.shape[2]) + 10
@@ -258,5 +259,5 @@ def do_filled_box(world, rand, elem, y, x):
     add_elem(world[:, y:y+16, x:x+16], elem)
 
 def do_small_circle(world, rand, elem, y, x):
-    rr, cc = skimage.draw.disk((y, x), 4, shape=(world.shape[1], world.shape[2]))
+    rr, cc = skimage.draw.disk((y, x), 5, shape=(world.shape[1], world.shape[2]))
     add_elem_rc(world, rr, cc, elem)
