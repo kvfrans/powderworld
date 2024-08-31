@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import skimage.draw
 import os
-from powderworld.sim import pw_elements
+from sim import pw_elements
 
 def lim(world_size, x):
     return np.clip(int(x), 0, world_size-1)
